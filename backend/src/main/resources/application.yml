@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: llm-gateway
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/gateway}
+    username: ${POSTGRES_USER:gateway}
+    password: ${POSTGRES_PASSWORD:change-me}
+  flyway:
+    enabled: true
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

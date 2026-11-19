@@ -1,0 +1,5 @@
+# Structured JSON logs for log aggregation.
+logging:
+  structured:
+    format:
+      console: ecs
