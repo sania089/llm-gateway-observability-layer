@@ -113,11 +113,11 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 **Done when:** `docker compose up` brings the stack up; CI is green; health endpoint works.
 
 ### Day 2: Provider abstraction + first provider (non-streaming)
-- [ ] Define `ProviderClient` interface (`chat(request) -> response`, `supports(model)`)
-- [ ] Internal request/response models (OpenAI-compatible schema)
-- [ ] Implement OpenAI provider with `RestClient`, timeouts, and error mapping
-- [ ] `POST /v1/chat/completions` controller (thin) → proxy service
-- [ ] WireMock-based provider tests
+- [x] Define `ProviderClient` interface (`chat(request) -> response`, `supports(model)`)
+- [x] Internal request/response models (OpenAI-compatible schema)
+- [x] Implement OpenAI provider with `RestClient`, timeouts, and error mapping
+- [x] `POST /v1/chat/completions` controller (thin) → proxy service
+- [x] WireMock-based provider tests
 
 **Done when:** a curl to the gateway returns a real completion from OpenAI.
 
