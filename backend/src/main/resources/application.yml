@@ -16,12 +16,35 @@ server:
 
 gateway:
   providers:
-    openai:
-      base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
-      api-key: ${OPENAI_API_KEY:}
+    gemini:
+      base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta/openai}
+      api-key: ${GEMINI_API_KEY:}
       connect-timeout: 5s
       read-timeout: 60s
-      model-prefixes: ${OPENAI_MODEL_PREFIXES:gpt-,o1,o3,o4}
+      model-prefixes: gemini-
+      # Free-tier guards: keep local limits just under the provider quota (override via env).
+      requests-per-minute: ${GEMINI_RPM:10}
+      max-concurrent: ${GEMINI_MAX_CONCURRENT:4}
+      max-attempts: 3
+      initial-backoff: 500ms
+      max-backoff: 8s
+      throttle-max-wait: 5s
+    groq:
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+      api-key: ${GROQ_API_KEY:}
+      connect-timeout: 5s
+      read-timeout: 60s
+      model-prefixes: ${GROQ_MODEL_PREFIXES:llama-,gemma,qwen,openai/,deepseek-,mixtral-}
+      requests-per-minute: ${GROQ_RPM:25}
+      max-concurrent: ${GROQ_MAX_CONCURRENT:4}
+      max-attempts: 3
+      initial-backoff: 500ms
+      max-backoff: 8s
+      throttle-max-wait: 5s
+  proxy:
+    stream-timeout: 5m
+    max-input-chars: ${GATEWAY_MAX_INPUT_CHARS:100000}
+    max-output-tokens: ${GATEWAY_MAX_OUTPUT_TOKENS:2048}
 
 management:
   endpoints:

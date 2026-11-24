@@ -23,8 +23,12 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(GatewayException.class)
     ResponseEntity<ApiError> handleGateway(GatewayException ex) {
-        return ResponseEntity.status(ex.status())
-                .body(ApiError.of(ex.getMessage(), ex.type(), ex.code()));
+        var response = ResponseEntity.status(ex.status());
+        if (ex.retryAfter() != null) {
+            long seconds = Math.max(1, (ex.retryAfter().toMillis() + 999) / 1000);
+            response.header(HttpHeaders.RETRY_AFTER, Long.toString(seconds));
+        }
+        return response.body(ApiError.of(ex.getMessage(), ex.type(), ex.code()));
     }
 
     @ExceptionHandler(Exception.class)

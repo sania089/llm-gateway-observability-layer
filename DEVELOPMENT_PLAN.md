@@ -3,6 +3,7 @@
 A Spring Boot proxy in front of LLM providers with caching, rate limiting, cost tracking, model fallback, prompt versioning, and a metrics dashboard.
 
 **Timeline:** 14 days, about 6-8 focused hours per day. Every day ends with something runnable, tested, and committed.
+**Free-only rule:** The project never calls a paid AI service. The only upstream providers are the free tiers of **Google Gemini** (AI Studio key) and **Groq**, both through their OpenAI-compatible endpoints. No OpenAI, Anthropic, or other paid keys are needed anywhere, including tests, load tests, and the demo. Free-tier limits (requests/min, requests/day, tokens/min) are a first-class design constraint: the gateway enforces them locally so the free keys never get blocked.
 **Rule:** No feature is cut. If a day slips, the stretch items in Day 13 absorb it, not the core features.
 
 ---
@@ -11,13 +12,13 @@ A Spring Boot proxy in front of LLM providers with caching, rate limiting, cost 
 
 | Problem | Gateway feature |
 |---|---|
-| Unbounded, invisible LLM spend | Cost tracking, per-key budgets |
-| Provider outages and throttling | Fallback chain, retries, circuit breaker |
+| Unbounded, invisible LLM usage (free-tier quota, notional spend) | Notional cost tracking, per-key budgets, quota tracking |
+| Provider outages and free-tier throttling (429s) | Local throttle, retries honouring Retry-After, Gemini and Groq fallback chain, circuit breaker |
 | Paying repeatedly for identical prompts | Response cache (exact + semantic) |
 | One user or service starving the others | Rate limiting per API key |
 | Prompts hardcoded as strings | Versioned prompt registry with rollback |
 | No visibility into latency, errors, tokens | Metrics, Prometheus, Grafana, custom dashboard |
-| Provider keys scattered everywhere | Gateway-issued keys; provider keys stay server-side |
+| Provider keys scattered everywhere | Gateway-issued keys; free provider keys stay server-side |
 
 ## 2. Tech Stack
 
@@ -25,6 +26,7 @@ A Spring Boot proxy in front of LLM providers with caching, rate limiting, cost 
 |---|---|---|
 | Language / Framework | Java 25 LTS, Spring Boot 3.x (MVC + virtual threads) | Simple blocking-style code that scales to thousands of concurrent calls |
 | HTTP client | Spring `RestClient` (sync) + streaming via `SseEmitter` | No reactive complexity |
+| Upstream providers | Gemini (Google AI Studio free tier) and Groq free tier, via OpenAI-compatible endpoints | Zero cost; one generic client, providers added by YAML |
 | Cache + rate limit state | Redis | Shared state across instances, atomic ops |
 | Rate limiting | Bucket4j (Redis backend) | Proven token-bucket implementation |
 | Resilience | Resilience4j | Circuit breaker, retry, timeout |
@@ -32,7 +34,7 @@ A Spring Boot proxy in front of LLM providers with caching, rate limiting, cost 
 | Metrics | Micrometer, Prometheus, Grafana | Standard stack |
 | Tracing | OpenTelemetry (stretch if short on time) | Request correlation |
 | Frontend | React + Vite + TypeScript + Recharts + TanStack Query | Fast to build, easy to read |
-| Testing | JUnit 5, Mockito, Testcontainers, WireMock, k6 | Real Redis/Postgres in tests, fake providers |
+| Testing | JUnit 5, Mockito, Testcontainers, WireMock, k6 | Real Redis/Postgres in tests, fake providers (WireMock only, so tests and load tests spend zero free-tier quota) |
 | DevOps | Docker, Docker Compose, GitHub Actions | Reproducible setup, CI |
 
 ## 3. Architecture
@@ -44,8 +46,9 @@ Client App ──► [Auth filter] ──► [Rate limiter] ──► [Cache loo
                                               [Prompt resolver]
                                                         ▼
                                           [Router + Fallback chain]
+                                [Quota throttle + retry + circuit breaker]
                                          ┌──────────┼──────────┐
-                                      OpenAI    Anthropic    Gemini ...
+                                      Gemini                  Groq   (free tiers)
                                          └──────────┼──────────┘
                                                         ▼
                               [Usage + cost calculator] ──► async log to Postgres
@@ -115,22 +118,29 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 ### Day 2: Provider abstraction + first provider (non-streaming)
 - [x] Define `ProviderClient` interface (`chat(request) -> response`, `supports(model)`)
 - [x] Internal request/response models (OpenAI-compatible schema)
-- [x] Implement OpenAI provider with `RestClient`, timeouts, and error mapping
+- [x] Implement the first provider with `RestClient`, timeouts, and error mapping (generic OpenAI-protocol client, reused for Gemini and Groq)
 - [x] `POST /v1/chat/completions` controller (thin) → proxy service
 - [x] WireMock-based provider tests
 
-**Done when:** a curl to the gateway returns a real completion from OpenAI.
+**Done when:** a curl to the gateway returns a real completion from a free provider (Gemini or Groq).
 
 ### Day 3: Second provider + streaming
-- [ ] Anthropic provider: translate to and from the internal schema
-- [ ] SSE streaming pass-through (`stream: true`) with correct chunk forwarding and client-disconnect handling
-- [ ] Capture token usage at end of stream (needed for cost on Day 5)
-- [ ] Provider registry: resolve provider by model name
+- [x] Gemini and Groq providers (free tiers) via their OpenAI-compatible endpoints (config-driven, no per-provider code)
+- [x] SSE streaming pass-through (`stream: true`) with correct chunk forwarding and client-disconnect handling
+- [x] Capture token usage at end of stream (needed for cost on Day 5)
+- [x] Provider registry: resolve provider by model name
+- [x] Free-tier guards per provider (YAML): local `requests-per-minute` sliding window and `max-concurrent` cap; callers queue briefly, then get `429` + `Retry-After` (`provider_quota_protected`)
+- [x] Bounded retries with exponential backoff + jitter on 429/5xx/timeouts/connection errors only; honour upstream `Retry-After` (give up if it exceeds the cap); never retry 4xx; streams retried only before the first chunk reaches the client
+- [x] Errors carry `retryable` and `Retry-After`; the gateway returns the `Retry-After` header on 429s
+- [x] Input enforcement: max prompt size (413) and default/cap on `max_tokens` so one request cannot drain the quota
+- [x] Retry counter metric `gateway.provider.retries{provider}`
+- [x] Tests for retry/backoff, Retry-After parsing, throttle, concurrency cap, and limits (WireMock and fakes, no real quota used)
 
-**Done when:** both providers work, streaming and non-streaming, through one endpoint.
+**Done when:** both providers work, streaming and non-streaming, through one endpoint, and a burst of requests degrades to clean 429s instead of exhausting the free quota.
 
 ### Day 4: Auth, API keys, request logging
 - [ ] Tables: `api_keys` (hashed key, owner, status, limits), `request_logs`
+- [ ] Startup check: warn clearly (do not crash) if `GEMINI_API_KEY` or `GROQ_API_KEY` is unset; `/actuator/health` shows which providers are configured
 - [ ] API key generation (show once, store only a SHA-256 hash)
 - [ ] Auth filter (`Authorization: Bearer gw-...`)
 - [ ] Async request logger (bounded queue + batch insert) that never blocks the request path
@@ -139,21 +149,23 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 
 **Done when:** every request is authenticated and appears in `request_logs`.
 
-### Day 5: Cost tracking
-- [ ] `model_pricing` table (input/output price per 1M tokens, effective-from date)
-- [ ] `CostCalculator`: tokens × price, stored per request in micro-dollars (integer, not float)
+### Day 5: Usage, quota and notional cost tracking
+Real spend is always $0 on free tiers. Cost is tracked as a **notional cost** (what the traffic would cost at the paid list price of the same or a comparable model) so budgets, dashboards, and cache savings stay meaningful.
+- [ ] `model_pricing` table (input/output reference price per 1M tokens, effective-from date, `free_tier` flag), seeded with Gemini and Groq list prices and editable
+- [ ] `CostCalculator`: tokens × reference price, stored per request in micro-dollars (integer, not float); also store `actual_cost_micros = 0` so real and notional are never confused
+- [ ] Free-tier quota tracking per provider: requests and tokens per minute and per day, with a remaining-quota gauge (`gateway.provider.quota.remaining`)
 - [ ] Token estimation fallback when the provider returns no usage
 - [ ] Aggregation queries: cost by key / model / day
 - [ ] Unit tests for cost math including edge cases
 
-**Done when:** every logged request has an accurate cost, verified against a known sample.
+**Done when:** every logged request has an accurate notional cost and counts toward the provider's quota usage, verified against a known sample.
 
 ### Day 6: Response caching
 - [ ] Deterministic cache key: hash of normalized (model, messages, temperature, params)
 - [ ] Redis exact-match cache with per-key TTL config
 - [ ] Skip cache for streaming-by-default? Decide and document: cache complete streams and replay them as SSE
 - [ ] Respect `Cache-Control: no-cache` and a `x-gateway-cache: HIT|MISS` response header
-- [ ] Cache hits cost $0 and are logged as such
+- [ ] Cache hits cost $0, consume no provider quota, and are logged as such (dashboard shows "quota saved")
 - [ ] Cache hit-rate metric
 
 **Done when:** a repeated request returns in milliseconds, is logged as a hit, and costs $0.
@@ -161,7 +173,8 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 ### Day 7: Rate limiting and budgets
 - [ ] Bucket4j + Redis token bucket per API key (requests/min)
 - [ ] Token-per-minute limit (uses estimated tokens before, actual after)
-- [ ] Monthly and daily spend budget per key (blocks when exceeded)
+- [ ] Monthly and daily budget per key, in notional dollars and/or tokens (blocks when exceeded)
+- [ ] Per-key share of the provider free-tier quota, so one key cannot use up the daily Gemini or Groq allowance for everyone
 - [ ] `429` with `Retry-After` and `x-ratelimit-*` headers
 - [ ] Limits configurable per key via admin API
 - [ ] Concurrency test: parallel requests respect limits exactly
@@ -169,11 +182,13 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 **Done when:** limits and budgets are enforced correctly under parallel load.
 
 ### Day 8: Fallback, retries, circuit breaker
-- [ ] Routing config: model → ordered provider/model fallback chain (YAML + DB override)
-- [ ] Retry with backoff only on retryable errors (429, 5xx, timeouts), never on 4xx
+- [ ] Routing config: model → ordered provider/model fallback chain (YAML + DB override), e.g. `gemini-2.0-flash → llama-3.3-70b-versatile`; the default chain crosses providers so one provider's quota exhaustion or outage is absorbed by the other
+- [ ] Treat local quota rejection (`provider_quota_protected`) and upstream 429 as fallback triggers
+- [ ] Retry layer exists from Day 3 (`ResilientProviderClient`); integrate it with the chain: retries stay on the same model, fallback moves to the next, with a total time budget per request
 - [ ] Resilience4j circuit breaker per provider (opens on failure rate, half-open probing)
-- [ ] Fallback to the next model, with the response tagged `x-gateway-fallback: gpt-4o→claude-sonnet`
-- [ ] Per-provider timeout settings
+- [ ] Fallback to the next model, with the response tagged `x-gateway-fallback: gemini-2.0-flash→llama-3.3-70b-versatile`
+- [ ] Per-provider timeout settings (already in YAML from Day 3)
+- [ ] Capability-aware fallback: skip targets that cannot serve the request (e.g. context too large)
 - [ ] Tests that simulate provider failure, slowness, and recovery with WireMock
 
 **Done when:** killing a provider mock makes traffic flow to the fallback with no client error.
@@ -220,20 +235,21 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 - [ ] API keys page: create, revoke, set limits and budgets, usage per key
 - [ ] Prompts page: list, view versions, diff, promote/rollback, per-version stats
 - [ ] Settings: routing/fallback chains and pricing table editor
-- [ ] **Semantic cache:** embed prompts (embeddings API), store vectors in Redis or pgvector, hit when similarity ≥ threshold (configurable, off by default)
+- [ ] **Semantic cache:** embed prompts using a free embedding source (Gemini embeddings free tier via the OpenAI-compatible `/embeddings` endpoint, or a local ONNX model that uses no quota), store vectors in Redis or pgvector, hit when similarity ≥ threshold (configurable, off by default)
 - [ ] **Request/response redaction:** option to mask PII or disable payload storage per key
 - [ ] OpenTelemetry tracing export (if time allows)
 
 **Done when:** everything is manageable from the UI without touching the DB or curl.
 
 ### Day 14: Hardening, load testing, docs, release
-- [ ] k6 load test: throughput, p95 overhead added by the gateway (target under 20 ms excluding provider time), streaming under concurrency
+- [ ] k6 load test against a **WireMock fake provider** (never the real free APIs): throughput, p95 overhead added by the gateway (target under 20 ms excluding provider time), streaming under concurrency
+- [ ] One small manual smoke test against real Gemini and Groq (a handful of requests), documented in the README
 - [ ] Chaos test: provider down, Redis down (gateway should degrade gracefully, not crash), Postgres slow
-- [ ] Security pass: key hashing, no secrets in logs, input size limits, CORS, dependency scan
+- [ ] Security pass: key hashing, no secrets in logs (provider keys and prompts are never logged), input size limits, CORS, dependency scan
 - [ ] Multi-stage Dockerfiles (backend + frontend), image size check
 - [ ] Final CI: build, test, image build, optional push
-- [ ] README: architecture diagram, quickstart (`docker compose up`), screenshots, benchmarks, design decisions
-- [ ] ADRs in `docs/` for key choices (MVC vs WebFlux, Redis, micro-dollars, hashing keys)
+- [ ] README: how to get the free Gemini and Groq keys, architecture diagram, quickstart (`docker compose up`), screenshots, benchmarks, design decisions
+- [ ] ADRs in `docs/` for key choices (MVC vs WebFlux, Redis, micro-dollars, hashing keys, free-tier-only providers with local quota guards)
 - [ ] Optional deploy: a single VM or Fly.io/Render with a live demo link
 
 **Done when:** a stranger can clone, run one command, and see a working gateway and dashboard.
@@ -244,11 +260,12 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 
 | Required feature | Day |
 |---|---|
-| OpenAI-compatible proxy, multi-provider | 2-3 |
+| OpenAI-compatible proxy, multi-provider (free Gemini + Groq) | 2-3 |
+| Retries, quota throttle, input limits | 3 |
 | Streaming | 3 |
 | API keys and auth | 4 |
 | Request logging | 4 |
-| Cost tracking and budgets | 5, 7 |
+| Notional cost, quota tracking and budgets | 5, 7 |
 | Caching (exact, then semantic) | 6, 13 |
 | Rate limiting | 7 |
 | Fallback, retry, circuit breaker | 8 |
@@ -269,7 +286,8 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 | Risk | Mitigation |
 |---|---|
 | Streaming edge cases (disconnects, partial usage) | Build and test on Day 3, not at the end |
-| Provider API costs during development | Use WireMock for tests; a cheap model for manual checks |
+| Free-tier quota exhaustion or account blocking | Local requests/min and concurrency throttle, `max_tokens` cap, prompt size limit, caching, cross-provider fallback; WireMock for all automated and load tests |
+| Free-tier limits or model names change | Limits and model prefixes are YAML/env config, not code; documented in an ADR |
 | Metrics tag explosion | Fixed low-cardinality tags only |
 | Log table growth | Hourly rollups + retention job + indexes |
 | Redis outage | Fail open on cache, fail safe on rate limit (configurable) |
@@ -277,4 +295,4 @@ Packages are organized **by feature**, not by layer. Each feature folder owns it
 
 ## 9. Out of Scope (v1)
 
-Multi-tenant billing/invoicing, user-facing login/SSO, fine-tuning management, non-chat endpoints (image/audio), and Kubernetes manifests (Compose is enough for v1).
+Any paid AI provider or paid plan, multi-tenant billing/invoicing, user-facing login/SSO, fine-tuning management, non-chat endpoints (image/audio), and Kubernetes manifests (Compose is enough for v1).
