@@ -45,6 +45,14 @@ gateway:
     stream-timeout: 5m
     max-input-chars: ${GATEWAY_MAX_INPUT_CHARS:100000}
     max-output-tokens: ${GATEWAY_MAX_OUTPUT_TOKENS:2048}
+  admin:
+    # Guards /admin/v1/**. Blank disables the admin API (no keys can be created).
+    key: ${GATEWAY_ADMIN_KEY:}
+  usage:
+    # Async request-log writer: bounded queue, batched inserts; entries are dropped when the queue is full.
+    queue-capacity: 10000
+    batch-size: 200
+    flush-interval: 500ms
 
 management:
   endpoints:
@@ -53,6 +61,8 @@ management:
         include: health,info,prometheus
   endpoint:
     health:
+      # Shows which providers have a key configured (names and status only, never the keys).
+      show-details: always
       probes:
         enabled: true
   metrics:

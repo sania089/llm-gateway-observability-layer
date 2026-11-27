@@ -1,6 +1,7 @@
 package com.gateway.proxy;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
@@ -11,13 +12,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.gateway.auth.ApiKeyPrincipal;
+import com.gateway.auth.ApiKeyService;
 import com.gateway.common.error.GatewayException;
 import com.gateway.provider.ChatChunk;
 import com.gateway.provider.ChatMessage;
 import com.gateway.provider.ChatRequest;
 import com.gateway.provider.ChatResponse;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -45,11 +51,24 @@ class ChatControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
+    private static final String VALID_KEY = "gw-valid";
+    private static final ApiKeyPrincipal CALLER = new ApiKeyPrincipal(UUID.randomUUID(), "tester");
+
     @MockitoBean
     private ProxyService proxyService;
 
+    @MockitoBean
+    private ApiKeyService apiKeyService;
+
+    @BeforeEach
+    void authenticateValidKey() {
+        when(apiKeyService.authenticate(VALID_KEY)).thenReturn(Optional.of(CALLER));
+    }
+
     private ResultActions postChat(String body) throws Exception {
-        return mockMvc.perform(post("/v1/chat/completions").contentType(MediaType.APPLICATION_JSON).content(body));
+        return mockMvc.perform(post("/v1/chat/completions")
+                .header("Authorization", "Bearer " + VALID_KEY)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 
     private ResultActions completeAsync(ResultActions started) throws Exception {
@@ -63,7 +82,7 @@ class ChatControllerTest {
         var response = new ChatResponse("chatcmpl-1", "chat.completion", 1L, "gpt-4o",
                 List.of(new ChatResponse.Choice(0, new ChatMessage("assistant", "Hi"), "stop")),
                 new ChatResponse.Usage(1, 1, 2));
-        when(proxyService.chat(any(ChatRequest.class))).thenReturn(response);
+        when(proxyService.chat(any(ChatRequest.class), eq(CALLER))).thenReturn(response);
 
         postChat("""
                 {"model":"gpt-4o","max_tokens":10,"messages":[{"role":"user","content":"Hello"}]}""")
@@ -83,9 +102,9 @@ class ChatControllerTest {
     @Test
     void streamsChunksAsSseAndEndsWithDoneMarker() throws Exception {
         doAnswer(invocation -> {
-            invocation.<Consumer<ChatChunk>>getArgument(1).accept(TEXT_CHUNK);
+            invocation.<Consumer<ChatChunk>>getArgument(2).accept(TEXT_CHUNK);
             return java.util.Optional.empty();
-        }).when(proxyService).stream(any(ChatRequest.class), any());
+        }).when(proxyService).stream(any(ChatRequest.class), eq(CALLER), any());
 
         completeAsync(postChat(STREAM_BODY))
                 .andExpect(status().isOk())
@@ -96,10 +115,27 @@ class ChatControllerTest {
     @Test
     void answersWithRealHttpErrorWhenStreamFailsBeforeFirstChunk() throws Exception {
         doThrow(new GatewayException(HttpStatus.NOT_FOUND, "invalid_request_error", "model_not_found", "nope"))
-                .when(proxyService).stream(any(ChatRequest.class), any());
+                .when(proxyService).stream(any(ChatRequest.class), eq(CALLER), any());
 
         completeAsync(postChat(STREAM_BODY))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("model_not_found"));
+    }
+
+    @Test
+    void rejectsRequestWithoutApiKeyUsingStandardErrorShape() throws Exception {
+        mockMvc.perform(post("/v1/chat/completions").contentType(MediaType.APPLICATION_JSON).content(STREAM_BODY))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("invalid_api_key"));
+    }
+
+    @Test
+    void rejectsUnknownApiKey() throws Exception {
+        when(apiKeyService.authenticate("gw-unknown")).thenReturn(Optional.empty());
+
+        mockMvc.perform(post("/v1/chat/completions").header("Authorization", "Bearer gw-unknown")
+                        .contentType(MediaType.APPLICATION_JSON).content(STREAM_BODY))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("invalid_api_key"));
     }
 }

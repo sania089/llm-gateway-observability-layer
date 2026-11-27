@@ -22,4 +22,16 @@ Check it works:
 - Metrics: http://localhost:8080/actuator/prometheus
 - Grafana: http://localhost:3000 (user `admin`, password from `GRAFANA_ADMIN_PASSWORD`, default `change-me`)
 
+## API keys
+
+Every `/v1/**` call needs a gateway key (`Authorization: Bearer gw-...`). Start the gateway with `GATEWAY_ADMIN_KEY` set, then create a key. The raw key is shown **once**; only its SHA-256 hash is stored.
+
+```bash
+curl -X POST http://localhost:8080/admin/v1/api-keys \
+  -H "Authorization: Bearer $GATEWAY_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"owner": "my-app"}'
+```
+
+Each request is recorded in the `request_logs` table (model, provider, latency, status, tokens; never prompt text).
+
 Copy `.env.example` to `.env` to override default credentials. Never commit `.env`.

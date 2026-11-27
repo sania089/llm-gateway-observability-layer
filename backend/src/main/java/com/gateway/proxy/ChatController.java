@@ -1,8 +1,10 @@
 package com.gateway.proxy;
 
+import com.gateway.auth.ApiKeyPrincipal;
 import com.gateway.provider.ChatRequest;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -19,7 +21,9 @@ public class ChatController {
 
     /** Returns a ChatResponse, or an SseEmitter when {@code stream: true}; hence the Object type. */
     @PostMapping("/v1/chat/completions")
-    public Object createChatCompletion(@Valid @RequestBody ChatRequest request) {
-        return request.isStreaming() ? chatStreamer.open(request) : proxyService.chat(request);
+    public Object createChatCompletion(
+            @Valid @RequestBody ChatRequest request,
+            @RequestAttribute(ApiKeyPrincipal.REQUEST_ATTRIBUTE) ApiKeyPrincipal caller) {
+        return request.isStreaming() ? chatStreamer.open(request, caller) : proxyService.chat(request, caller);
     }
 }

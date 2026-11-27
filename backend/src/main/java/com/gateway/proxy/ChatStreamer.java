@@ -1,5 +1,6 @@
 package com.gateway.proxy;
 
+import com.gateway.auth.ApiKeyPrincipal;
 import com.gateway.common.error.ApiError;
 import com.gateway.common.error.GatewayException;
 import com.gateway.provider.ChatRequest;
@@ -27,16 +28,16 @@ class ChatStreamer {
         this.properties = properties;
     }
 
-    SseEmitter open(ChatRequest request) {
+    SseEmitter open(ChatRequest request, ApiKeyPrincipal caller) {
         var emitter = new SseEmitter(properties.streamTimeout().toMillis());
-        Thread.startVirtualThread(() -> run(request, emitter));
+        Thread.startVirtualThread(() -> run(request, caller, emitter));
         return emitter;
     }
 
-    private void run(ChatRequest request, SseEmitter emitter) {
+    private void run(ChatRequest request, ApiKeyPrincipal caller, SseEmitter emitter) {
         var started = new AtomicBoolean(false);
         try {
-            proxyService.stream(request, chunk -> {
+            proxyService.stream(request, caller, chunk -> {
                 send(emitter, chunk, MediaType.APPLICATION_JSON);
                 started.set(true);
             });

@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
 import java.util.List;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * apiKey may be blank so the app can boot without it; calls then fail with 503.
@@ -31,6 +32,8 @@ public record ProviderProperties(
         Integer maxConcurrent,
         Duration throttleMaxWait) {
 
+    /** Required: with two constructors, Spring cannot pick one and silently binds nothing. */
+    @ConstructorBinding
     public ProviderProperties {
         maxAttempts = maxAttempts == null ? 3 : Math.max(1, maxAttempts);
         initialBackoff = initialBackoff == null ? Duration.ofMillis(500) : initialBackoff;
